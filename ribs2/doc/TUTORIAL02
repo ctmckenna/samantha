@@ -1,0 +1,319 @@
+ ________________________________
+'
+| TUTORIAL02 - simple file server
+`--------------------------------
+
+In this tutorial we will build a simple file server. The following
+topics will be covered:
+* Intercepting specific URI
+* Sending files via sendfile
+* Directory listing
+* Additional http server configuration
+
+Step 1, creating project and make files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Create the following directories under 'projects' (see TUTORIAL01):
+* httpd
+* httpd/src
+
+Create and edit file called httpd/src/Makefile and paste the following
+code:
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+   TARGET=httpd    # the name of the executable
+
+   SRC=httpd.c     # list of source files
+
+   # we need to tell gcc where to find the include files of ribs2
+   CFLAGS+= -I ../../ribs2/include
+   # we need to tell the linker where to find ribs2 libraries
+   LDFLAGS+= -L ../../ribs2/lib -lribs2
+
+   include ../../ribs2/make/ribs.mk  # include ribs2 make system
+.                                                                   .
+|___________________________________________________________________|
+
+And simple main, httpd/src/httpd.c
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+   #include "ribs.h"
+
+   int main(void) {
+       return 0;
+   }
+.                                                                   .
+|___________________________________________________________________|
+
+If you have a top level makefile (as implemented in TUTORIAL01), you
+should add your new project to it, this is how it should look (new
+lines are commented with '<== add this line'):
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+   all:
+           @$(MAKE) -s -C ribs2              # make ribs2 first
+           @echo "[helloworld] build"
+           @$(MAKE) -s -C helloworld/src     # make our project
+           @echo "[httpd] build"             #  <== add this line
+           @$(MAKE) -s -C httpd/src          #  <== add this line
+   clean:
+           @$(MAKE) -s -C ribs2 clean        # clean ribs2
+           @echo "[helloworld] clean"
+           @$(MAKE) -s -C helloworld/src clean # clean our project
+           @echo "[httpd] clean"             #  <== add this line
+           @$(MAKE) -s -C httpd/src clean    #  <== add this line
+.                                                                   .
+|___________________________________________________________________|
+
+We are now ready to write some code.
+
+Step 2, command line options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Since we are going to extract command line args, let's change the
+'main' function to:
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+   int main(int argc, char *argv[]) {
+       return 0;
+   }
+.                                                                   .
+|___________________________________________________________________|
+
+Now add the following lines to main. This will allow specifying port
+number and whether to run our server as service (daemon).
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+    static struct option long_options[] = {
+        {"port", 1, 0, 'p'},
+        {"daemonize", 0, 0, 'd'},
+        {"help", 0, 0, 1},
+        {0, 0, 0, 0}
+    };
+    int port = 8080;
+    int daemon_mode = 0;
+    while (1) {
+        int option_index = 0;
+        int c = getopt_long(argc, argv, "p:d", long_options,
+           &option_index);
+        if (c == -1)
+            break;
+        switch (c) {
+        case 'p':
+            port = atoi(optarg);
+            break;
+        case 'd':
+            daemon_mode = 1;
+            break;
+        }
+    }
+.                                                                   .
+|___________________________________________________________________|
+
+Step 3, initialize the server
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Let's start by adding empty request handler
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+   void simple_file_server(void) {
+   }
+.                                                                   .
+|___________________________________________________________________|
+
+Add the following to your main.
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+    /* server config */
+    struct http_server server = {
+        /* port number */
+        .port = port,
+
+        /* call simple_file_server upon receiving http request */
+        .user_func = simple_file_server,
+
+        /* set idle connection timeout to 60 seconds */
+        .timeout_handler.timeout = 60000,
+
+        /* set each fiber's stack size to 64K */
+        .stack_size = 64*1024,
+
+        /* start the server with 100 stacks */
+        /* more stacks will be created if necessary */
+        .num_stacks =  100,
+
+        /* we expect most of our requests to be less than 8K */
+        .init_request_size = 8192,
+
+        /* we expect most of our response headers to be less than
+           8K */
+        .init_header_size = 8192,
+
+        /* we expect most of our response payloads to be less than
+           8K */
+        .init_payload_size = 8192,
+
+        /* no limit on the request size, this should be set to
+           something reasonable if you want to protect your server
+           against denial of service attack */
+        .max_req_size = 0,
+
+        /* no additional space is needed in the context to store app
+           specified data (fiber local storage) */
+        .context_size = 0
+    };
+
+    /* initialize server, but don't accept connections yet */
+    if (0 > http_server_init(&server)) {
+        printf("http_server_init failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* run as daemon if specified */
+    if (daemon_mode)
+        daemonize();
+
+    /* initialize the event loop */
+    if (0 > epoll_worker_init()) {
+        printf("epoll_worker_init failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* start accepting connections, must be called after initializing
+       epoll worker */
+    if (0 > http_server_init_acceptor(&server)) {
+        printf("http_server_init_acceptor failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* lastly, we need to handle events */
+    epoll_worker_loop();
+.                                                                   .
+|___________________________________________________________________|
+The code above is very similar to the one in the helloworld tutorial,
+with few minor additions, we included most of the http server
+configuration parameters. If you intend on implementing a server that
+will be serving real traffic from the internet you should tune the
+configuration based on your needs. You can use the above example as a
+starting point.
+
+Step 4, let's send some files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We will start by parsing the URI. In order to do that, add the
+following lines to your simple_file_server function:
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+    /* get the current http server context */
+    struct http_server_context *ctx = http_server_get_context();
+
+    /* uri decode the uri in the context */
+    http_server_decode_uri(ctx->uri);
+
+    /* remove the leading slash, we will be serving files from the
+       current directory */
+    const char *file = ctx->uri;
+    if (*file == '/') ++file;
+.                                                                   .
+|___________________________________________________________________|
+
+Now that we have the name of the file, we can use RIBS framework to
+send the file back in the response. This can be achieve by calling the
+function 'http_server_sendfile' as shown below:
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+    int res = http_server_sendfile(file);
+.                                                                   .
+|___________________________________________________________________|
+'http_server_sendfile' return values:
+   * negative value if the operation failed.
+   * HTTP_SERVER_NOT_FOUND is returned when the file doesn't exist
+   * positive values, the specified file is a directory
+
+Let's add the following code to handle errors:
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+    int res = http_server_sendfile(file);
+    if (0 > res) {
+        /* not found */
+        if (HTTP_SERVER_NOT_FOUND == res)
+            http_server_response_sprintf(HTTP_STATUS_404,
+                HTTP_CONTENT_TYPE_TEXT_PLAIN, "not found: %s", file);
+        else
+            http_server_response_sprintf(HTTP_STATUS_500,
+                HTTP_CONTENT_TYPE_TEXT_PLAIN,
+                "500 Internal Server Error: %s", file);
+    }
+    else if (0 < res) {
+        /* directory */
+        if (0 > http_server_generate_dir_list(ctx->uri)) {
+            http_server_response_sprintf(HTTP_STATUS_404,
+                HTTP_CONTENT_TYPE_TEXT_PLAIN, "dir not found: %s",
+                ctx->uri);
+            return;
+        }
+        http_server_response(HTTP_STATUS_200,
+                             HTTP_CONTENT_TYPE_TEXT_HTML);
+    }
+.                                                                   .
+|___________________________________________________________________|
+In the code above we also call the function
+'http_server_generate_dir_list' to generate a directory listing when
+the specified file is a directory. You can omit that block and return
+403 forbidden instead as shown below:
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+    int res = http_server_sendfile(file);
+        /* not found */
+        if (HTTP_SERVER_NOT_FOUND == res)
+            http_server_response_sprintf(HTTP_STATUS_404,
+                HTTP_CONTENT_TYPE_TEXT_PLAIN, "not found: %s", file);
+        else
+            http_server_response_sprintf(HTTP_STATUS_500,
+                HTTP_CONTENT_TYPE_TEXT_PLAIN,
+                "500 Internal Server Error: %s", file);
+    }
+    else if (0 < res) {
+        http_server_response_sprintf(HTTP_STATUS_403,
+               HTTP_CONTENT_TYPE_TEXT_PLAIN, "Forbidden");
+    }
+.                                                                   .
+|___________________________________________________________________|
+
+Step 5, testing performance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* Directory listing is relativly slow since it needs to retrieve information per file.
+* If the file is not cached in memory, the first request to fetch the file will be slower.
+
+ ___________________________________________________________________
+|                                                                   |
+.                                                                   .
+   # first make sure your server is running
+   $ ./httpd/bin/httpd &
+
+   # run apache-benchmark
+   # the following tests 404 Not found
+   $ ab -k -c 8 -n 1000000 http://localhost:8080/test404
+   # the following tests small file
+   $ ab -k -c 8 -n 1000000 http://localhost:8080/Makefile
+
+   # -k for persistent connections, -c for concurrency of 8,
+   # -n for 1 million requests
+.                                                                   .
+|___________________________________________________________________|
+
+To test large files, put a large file in the current directory and
+invoke 'ab' specifying your file name in the URI as shown in the
+example above.
+
+Furthermore, try adding few media files to your server (current
+directory, where you started your server) and then navigate to your
+server using a browser, check the directory listing and make sure that
+images and videos show/stream correctly.

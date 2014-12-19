@@ -1,0 +1,8 @@
+bin
+lib
+obj
+ribified
+*~
+TAGS
+perf.data*
+
